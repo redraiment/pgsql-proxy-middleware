@@ -7,7 +7,7 @@ The one-liner node.js RESTful middleware for PostgreSQL tables.
 ## npm
 
 ```sh
-npm install pgsql-proxy-middleware
+npm i pgsql-proxy-middleware
 ```
 
 ## yarn
@@ -16,7 +16,7 @@ npm install pgsql-proxy-middleware
 yarn add pgsql-proxy-middleware
 ```
 
-# Config
+# setupProxy.js
 
 ```js
 const bodyParser = require('body-parser');

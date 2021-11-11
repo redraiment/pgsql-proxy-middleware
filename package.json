@@ -1,6 +1,6 @@
 {
   "name": "pgsql-proxy-middleware",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "The one-liner node.js RESTful middleware for PostgreSQL tables.",
   "main": "index.js",
   "homepage": "https://github.com/redraiment/pgsql-proxy-middleware",
@@ -18,7 +18,7 @@
   "author": "Zhang Zepeng <redraiment@gmail.com> (http://zzp.me)",
   "license": "BSD-2-Clause",
   "dependencies": {
-    "pg": "^7.11.0"
+    "pg": ">=7.11.0"
   },
   "devDependencies": {},
   "scripts": {
