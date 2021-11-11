@@ -126,7 +126,7 @@ const show = (table, id) => () => ({
 const create = table => record => {
     const keys = Object.keys(record)
     const columns = keys.join(', ');
-    const placeholders = keys.keys()
+    const placeholders = [...keys.keys()]
           .map(index => `\$${index + 1}`)
           .join(', ');
 
