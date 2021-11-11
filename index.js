@@ -1,120 +1,272 @@
-// Database wrapper
-
 const { Pool } = require('pg');
 
-const executor = (pool, response) => (({ sql, wrapper }) => (
-    pool.query(sql)
-        .then(rs => response.json(wrapper? wrapper(rs.rows): rs.rows))
-        .catch(exception => response.status(400).json({ sql, exception }))
-));
+/* Common Utilities */
 
+/**
+ * Common Result Handler: fetch the first row if exists.
+ */
 const first = rows => rows? rows[0]: null;
 
-// RESTful actions
+/**
+ * Check is undefined.
+ */
+const isUndefined = o => typeof(o) === 'undefined';
 
-const split = parameters => ({
-    keys: Object.keys(parameters),
-    values: Object.values(parameters)
-});
+/**
+ * Check is string.
+ */
+const isString = o => typeof(o) === 'string';
 
-const index = (table) => (() => ({
-    sql: `select * from ${table}`
-}));
+/* Database Operators */
 
-const show = (table, id) => (() => ({
+/**
+ * Execute SQL and response result as json.
+ */
+const execute = (pool, { sql, handler }, response) => pool.query(sql)
+      .then(rs => response.json(handler? handler(rs.rows): rs.rows))
+      .catch(exception => response.status(400).json({ sql, exception }));
+
+/* RESTful Actions */
+
+/**
+ * Index: list the resources.
+ */
+const index = table => ({ orders = [], page, size }) => {
+    const values = [];
+
+    let orderBy = '';
+    if (orders.length > 0) {
+        orderBy = ' order by ';
+        orderBy += orders
+            .map(order => isString(order)? { column: order }: order)
+            .map(({ column, mode = 'asc' }) => `${column} ${mode}`)
+            .join(', ');
+    }
+    
+    let limitOffset = '';
+    if (!isUndefined(page) || !isUndefined(size)) {
+        if (!isUndefined(page)) {
+            page = parseInt(page);
+        }
+        if (isUndefined(page) || page < 1) {
+            page = 1;
+        }
+
+        if (!isUndefined(size)) {
+            size = parseInt(size);
+        }
+        if (isUndefined(size) || size < 0) {
+            size = 20;
+        }
+
+        limitOffset = ' limit $1 offset $2';
+        values.push(size);
+        values.push((page - 1) * size);
+    }
+
+    return {
+        sql: {
+            text: `
+with statistics as (
+  select
+    count(*) as total
+  from
+    ${table}
+), records as (
+  select
+    to_jsonb(${table}) as record
+  from
+    ${table}
+  ${orderBy}
+  ${limitOffset}
+), page as (
+  select
+    jsonb_agg(record) as records
+  from
+    records
+)
+select
+  jsonb_build_object(
+    'total', statistics.total,
+    'records', page.records
+  ) as "result"
+from
+  statistics,
+  page
+`,
+            values
+        },
+        handler: rows => {
+            const result = rows[0].result;
+            if (!isUndefined(page)) {
+                result['page'] = page;
+            }
+            if (!isUndefined(size)) {
+                result['size'] = size;
+            }
+            return result;
+        }
+    };
+};
+
+/**
+ * Show: returns specified record.
+ */
+const show = (table, id) => () => ({
     sql: {
         text: `select * from ${table} where id = $1`,
         values: [id]
     },
-    wrapper: first
-}));
-
-const create = (table) => (parameters => {
-    const { keys, values } = split(parameters);
-    return {
-        sql: {
-            text: `insert into ${table} (${keys.join(', ')}) values (${keys.map((key, index) => `\$${index + 1}`).join(', ')}) returning *`,
-            values
-        },
-        wrapper: first
-    };
+    handler: first
 });
 
-const update = (table, id) => (parameters => {
-    const { keys, values } = split(parameters);
+/**
+ * Create: inserts and returns new `record`.
+ */
+const create = table => record => {
+    const keys = Object.keys(record)
+    const columns = keys.join(', ');
+    const placeholders = keys.keys()
+          .map(index => `\$${index + 1}`)
+          .join(', ');
+
+    const values = Object.values(record);
+
+    return {
+        sql: {
+            text: `insert into ${table} (${columns}) values (${placeholders}) returning *`,
+            values
+        },
+        handler: first
+    };
+};
+
+/**
+ * Update: overwrite specified fields of `record`.
+ */
+const update = (table, id) => record => {
+    const columns = Object.keys(record)
+          .map((column, index) => `${column} = \$${index + 1}`)
+          .join(', ');
+
+    const values = Object.values(record);
     values.push(id);
+
     return {
         sql: {
-            text: `update ${table} set ${keys.map((key, index) => `${key} = \$${index + 1}`).join(', ')} where id = \$${values.length} returning *`,
+            text: `update ${table} set ${columns} where id = \$${values.length} returning *`,
             values
         },
-        wrapper: first
+        handler: first
     };
-});
+};
 
+/**
+ * Patch: same with update.
+ */
 const patch = update;
 
-const remove = (table, id) => ((params) => ({
+/**
+ * Delete: delete the specified record.
+ */
+const remove = (table, id) => () => ({
     sql: {
         text: `delete from ${table} where id = $1 returning *`,
         values: [id]
     },
-    wrapper: first
-}));
+    handler: first
+});
 
-// url routers
+/* Routers */
 
-const regexp_quote = s => s? s.replace(/([\[\]\^\$\|\(\)\\\+\*\?\{\}\=\!])/gi, '\\$1'): s;
+/**
+ * Dispatch request to RESTful action.
+ */
+const dispatch = (method, table, id) => {
+    const isSingle = !isUndefined(id);
+    if (isSingle) {
+        id = parseInt(id);
+    }
 
-const url_path_pattern = tables => new RegExp(`^/(${tables.map(regexp_quote).join('|')})(?:/(\\d+))?/?\$`, 'i');
-
-const router = (method, table, id) => {
-    const is_single = id !== undefined;
-    if (method === 'GET' && !is_single) {
+    if (method === 'GET' && !isSingle) {
         return index(table);
-    } else if (method === 'GET' && is_single) {
+    } else if (method === 'GET' && isSingle) {
         return show(table, id);
-    } else if (method === 'POST' && !is_single) {
+    } else if (method === 'POST' && !isSingle) {
         return create(table);
-    } else if (method === 'PUT' && is_single) {
+    } else if (method === 'PUT' && isSingle) {
         return update(table, id);
-    } else if (method === 'PATCH' && is_single) {
+    } else if (method === 'PATCH' && isSingle) {
         return patch(table, id);
-    } else if (method === 'DELETE' && is_single) {
+    } else if (method === 'DELETE' && isSingle) {
         return remove(table, id);
-    } else {
-        return null;
+    }
+
+    return null;
+};
+
+/**
+ * Create RESTful request matcher.
+ * - Request accepts json type response.
+ * - Request URL matches [prefix]<resource>[/<id>].
+ */
+const matcherOf = (prefix, tables) => {
+    const resources = new Set(tables);
+    return request => {
+        if (request.accepts('json')) {
+            let path = request.path;
+
+            // strip prefix
+            if (path.startsWith(prefix)) {
+                path = path.substring(prefix.length);
+            } else {
+                return false;
+            }
+
+            const [resource, id] = path.split('/', 2);
+            if (resources.has(resource)
+                && (isUndefined(id) || /^\d+$/.test(id))) {
+                return dispatch(request.method, resource, id);
+            } else {
+                return false;
+            }
+        }
+        return false;
     }
 };
 
-const match = (pattern, request) => {
-    if (request.accepts('json')) {
-        const matcher = pattern.exec(request.path);
-        if (matcher) {
-            const table = matcher[1];
-            const id = matcher[2];
-            return router(request.method, table, id);
-        }
+/**
+ * Create RESTful router.
+ */
+const router = (pool, matcher) => (request, response, next) => {
+    const action = matcher(request);
+    if (action) {
+        execute(pool, action(request.body), response);
+    } else {
+        next();
     }
-    return null;
-}
+};
 
-// middleware
+// Middleware
 
-const proxy = (pgConfig, ...tables) => {
+/**
+ * PostgreSQL Proxy Middleware.
+ * - prefix?: optional url prefix. '/' default.
+ * - pgConfig: PostgreSQL connection information.
+ * - ...tables: list of table names.
+ */
+const proxy = (...params) => {
+    let prefix, pgConfig, tables;
+    if (isString(params[0])) {
+        [prefix, pgConfig, ...tables] = params;
+    } else {
+        prefix = '/';
+        [pgConfig, ...tables] = params;
+    }
+
     const pool = new Pool(pgConfig);
-    const pattern = url_path_pattern(tables);
-    return (request, response, next) => {
-        const action = match(pattern, request);
-        if (action) {
-            const { sql, wrapper } = action(request.body);
-            pool.query(sql)
-                .then(rs => response.json(wrapper? wrapper(rs.rows): rs.rows))
-                .catch(exception => response.status(400).json({ sql, exception }))
-        } else {
-            next();
-        }
-    };
+    const matcher = matcherOf(prefix, tables);
+    return router(pool, matcher);
 };
 
 module.exports = proxy;
